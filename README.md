@@ -10,20 +10,20 @@ Every generated project ships with a `CLAUDE.md` that encodes all architectural 
 ## Usage
 
 ```bash
-uvx templum new my-service
+uvx templum my-service
 ```
 
 Or install globally and use as a persistent command:
 
 ```bash
 uv tool install templum
-templum new my-service
+templum my-service
 ```
 
 With options:
 
 ```bash
-templum new my-service --output-dir ~/projects --python 3.12
+templum my-service --output-dir ~/projects --python 3.12
 ```
 
 | Flag | Default | Description |
