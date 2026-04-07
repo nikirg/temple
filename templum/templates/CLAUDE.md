@@ -17,9 +17,9 @@ When rules conflict, preserve architectural boundaries first, then type safety, 
 ### Required
 
 * Use layered architecture: `router -> service -> infrastructure`.
-* Keep each domain self-contained: `router.py`, `service.py`, `schemas.py`, `exceptions.py`, optional `worker.py` or local adapters.
+* Keep each domain self-contained: `service.py`, `schemas.py`, `exceptions.py`, optional `router.py`, optional `worker.py` or local adapters.
 * Keep routers thin. Routers handle transport concerns; services own business logic.
-* Services depend on interfaces, not concrete adapters.
+* Services depend on interfaces when multiple implementations exist or a swap is anticipated; depend on a concrete adapter directly when there is a single implementation with no planned replacement.
 * Build the dependency graph explicitly in setups. Do not use service locators, implicit globals, or hidden wiring.
 * Validate requests, config, queue payloads, and third-party responses at the boundary before they enter the domain.
 * Public APIs must be typed: explicit argument and return annotations are required.
@@ -36,9 +36,9 @@ When rules conflict, preserve architectural boundaries first, then type safety, 
 * Prefer batched external calls when this improves latency or load without harming fairness or memory usage.
 * Prefer iteration/streaming over preloading full collections into memory.
 
-### Local choice
+### Required (framework boundaries)
 
-* `auth.py`, `deps.py`, and `setups/base.py` are framework-owned extension points and should not be modified directly.
+* `auth.py`, `deps.py`, and `setups/base.py` are framework-owned extension points and must not be modified directly.
 * Extend infrastructure by adding new setups or adapter implementations rather than patching framework internals.
 
 ---
@@ -107,22 +107,61 @@ app/
 ├── setups/
 │   ├── base.py
 │   └── local.py
-├── <infrastructure>/
-│   ├── base.py
-│   └── <impl>.py
+├── <infrastructures>/     # plural: multiple implementations
+│   ├── base.py            # optional: only when interface is needed
+│   └── <backend>/
+│       └── <infrastructure>.py
+├── <infrastructure>/      # singular: single implementation
+│   └── <infrastructure>.py
 └── <domain>/
-    ├── router.py
     ├── service.py
     ├── schemas.py
     ├── exceptions.py
-    └── worker.py
+    ├── router.py          # optional
+    └── worker.py          # optional
 ```
 
 ### Structure rules
 
 * Shared adapters and interfaces live in top-level infrastructure folders.
 * Domain modules contain business-facing code for one domain.
+* `router.py` is optional — a service used only as a dependency of another service does not need to expose an HTTP API.
 * `worker.py` is optional and used only when the domain owns background processing.
+
+### Infrastructure layout
+
+An infrastructure folder may contain a flat list of files or nested subfolders for complex implementations. Naming follows these rules:
+
+* Use plural when there are multiple implementations (`repositories/`, `notifiers/`), singular when there is only one (`billing_client/`).
+* The entrypoint file inside a subfolder matches the singular form of the folder name (`repository.py`, `billing_client.py`).
+* Add `base.py` with an abstract interface when multiple implementations exist or a swap is anticipated. Omit it when there is a single implementation with no planned replacement.
+* Each infrastructure unit may have its own `schemas.py` and `exceptions.py` when the implementation warrants it.
+
+```text
+app/
+├── repositories/          # interface + multiple implementations (subfolders)
+│   ├── base.py            # Repository (ABC)
+│   ├── postgres/
+│   │   ├── repository.py  # entrypoint
+│   │   ├── queries.py
+│   │   └── models.py
+│   └── redis/
+│       └── repository.py
+├── notifiers/             # interface + multiple implementations (flat files)
+│   ├── base.py            # Notifier (ABC)
+│   ├── email.py
+│   ├── sms.py
+│   ├── telegram.py
+│   └── whatsapp.py
+└── billing_client/        # no interface, single complex implementation
+    ├── billing_client.py  # entrypoint
+    ├── schemas.py
+    └── exceptions.py
+```
+
+### Clients for external and internal APIs
+
+HTTP clients for other services are infrastructure, not services. They live in a dedicated folder following the infrastructure naming rules above and may own their own `schemas.py` and `exceptions.py`. Wrap a client in a service only when business logic (aggregation, enrichment, domain rules) sits on top of it.
 
 ---
 
@@ -132,11 +171,11 @@ app/
 | ------------------- | ------------------------------------ | --------------------------------- |
 | Classes             | `PascalCase`                         | `OrderService`, `RedisRepository` |
 | Functions / methods | `snake_case`                         | `create_order`, `get_order`       |
-| Files / modules     | `snake_case`                         | `router.py`, `redis_repo.py`      |
+| Files / modules     | `snake_case`                         | `router.py`, `repository.py`      |
 | Private attrs       | `_leading_underscore`                | `self._repository`                |
 | Constants           | `UPPER_SNAKE_CASE`                   | `MAX_BATCH_SIZE`                  |
 | Env vars            | `UPPER_SNAKE_CASE` / `NESTED__FIELD` | `APP_PORT`, `REDIS__URL`          |
-| Setups              | name by infrastructure choice        | `LocalSetup`, `RedisSetup`        |
+| Setups              | name by deployment environment       | `LocalSetup`, `CloudSetup`, `OnPremSetup` |
 
 Additional defaults:
 
@@ -189,7 +228,7 @@ Do not mark a function `async` only because it is called from async code.
 
 ## Dependency Injection and Setups
 
-A setup assembles one full dependency graph for one infrastructure combination.
+A setup assembles one full dependency graph for one infrastructure combination. Create a new setup when the dependency graph changes significantly — for example, an on-premise deployment uses a local message queue and file storage, while a cloud deployment wires SQS and S3 in their place. If only one or two concrete adapters need to vary, inject the variant directly rather than creating a separate setup.
 
 ### Required
 
@@ -243,7 +282,7 @@ Rules:
 
 ## Service Layer
 
-Services contain business behavior and orchestrate domain operations through interfaces.
+Services contain business behavior and orchestrate domain operations through interfaces. `service.py` holds the domain's entrypoint class — the primary object other layers interact with. Complex domains may spread logic across additional modules inside the domain folder; `service.py` is the entry point, not the container for all logic.
 
 ```python
 class EntityService:
@@ -268,6 +307,7 @@ Rules:
 * Enforce invariants and create domain objects in the service or deeper domain layer, not in transport schemas.
 * Raise domain exceptions, not transport exceptions.
 * Keep serialization, HTTP concerns, and adapter-specific details out of the service.
+* Let infrastructure exceptions propagate unless the service has a meaningful recovery or retry strategy. Do not swallow or re-wrap them without purpose.
 
 ---
 
@@ -384,7 +424,7 @@ Rules:
 
 ### Infrastructure tests
 
-* Verify adapters against the interface contract.
+* Verify adapters against the interface contract when one exists; otherwise test the concrete implementation directly.
 * Cover serialization, error handling, cleanup, and integration edge cases.
 
 ### End-to-end tests
@@ -398,13 +438,13 @@ Rules:
 
 ### New domain
 
-* Create `app/<domain>/router.py`
-* Create `app/<domain>/service.py`
+* Create `app/<domain>/service.py` — the domain entrypoint class
 * Create `app/<domain>/schemas.py`
 * Create `app/<domain>/exceptions.py`
+* Create `app/<domain>/router.py` only if the domain exposes an HTTP API; omit if the service is consumed solely by other services
 * Add `worker.py` or domain-local adapters only if needed
 * Register the service in the selected setup
-* Add the router in `main.py`
+* Add the router in `main.py` (if a router was created)
 * Add router and service tests
 
 ### New setup
